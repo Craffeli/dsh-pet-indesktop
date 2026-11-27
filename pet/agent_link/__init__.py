@@ -1122,8 +1122,12 @@ def teleagent_part_state(part: dict) -> str:
             return "error"
         return "working"
     if part_type == "step-finish":
-        # reason=tool-calls：模型停笔等工具结果，回合尚未结束
-        return "" if str(part.get("reason") or "") == "tool-calls" else "idle"
+        # reason=tool_calls / tool-calls：模型停笔等工具结果，回合尚未结束。
+        # TeleAgent 的本地库用下划线（tool_calls），OpenCode 事件流用连字符
+        # （tool-calls）——两种写法都必须识别，否则每步工具结束都会被误判成
+        # idle，桌宠会反复"开始干活"而永远等不到真正的完成。
+        reason = str(part.get("reason") or "").strip().lower().replace("_", "-")
+        return "" if reason == "tool-calls" else "idle"
     return ""
 
 

@@ -1081,6 +1081,60 @@ class TestRealFormatMappers:
         assert opencode_event_state("message.part.updated.1", "not json") == ""
 
 
+class TestDesktopAgentMappers:
+    """Trae / WorkBuddy / TeleAgent / Cherry Studio 的本地数据映射。"""
+
+    def test_teleagent_step_finish_reason_aliases(self):
+        from pet.agent_link import teleagent_part_state, teleagent_part_tool
+        assert teleagent_part_state({"type": "step-start"}) == "working"
+        assert teleagent_part_state({"type": "reasoning"}) == "thinking"
+        # TeleAgent 本地库写下划线、OpenCode 事件流写连字符；两者都表示
+        # 「模型停笔等工具结果」，回合尚未结束，不得判 idle（否则每步工具都会
+        # 触发一次「开始干活」并永远等不到完成）。
+        assert teleagent_part_state({"type": "step-finish", "reason": "tool_calls"}) == ""
+        assert teleagent_part_state({"type": "step-finish", "reason": "tool-calls"}) == ""
+        assert teleagent_part_state({"type": "step-finish", "reason": "stop"}) == "idle"
+        assert teleagent_part_state(
+            {"type": "tool", "tool": "read", "state": {"status": "completed"}}) == "working"
+        assert teleagent_part_state(
+            {"type": "tool", "tool": "read", "state": {"status": "error"}}) == "error"
+        assert teleagent_part_tool({"type": "tool", "tool": "powershell"}) == "powershell"
+        assert teleagent_part_tool({"type": "step-start"}) == ""
+
+    def test_workbuddy_records(self):
+        from pet.agent_link import workbuddy_line_state, workbuddy_line_tool
+        assert workbuddy_line_state({"type": "message", "role": "user"}) == "thinking"
+        assert workbuddy_line_state({"type": "message", "role": "assistant"}) == "idle"
+        assert workbuddy_line_state({"type": "reasoning"}) == "thinking"
+        call = {"type": "function_call", "name": "Bash"}
+        assert workbuddy_line_state(call) == "working"
+        assert workbuddy_line_tool(call) == "Bash"
+        assert workbuddy_line_state({"type": "ai-title"}) == ""
+
+    def test_trae_hub_records(self):
+        from pet.agent_link import trae_hub_state, trae_hub_tool
+        run = {"type": "metadata", "data": json.dumps({"metadata_status": "in_progress"})}
+        done = {"type": "metadata", "data": json.dumps({"metadata_status": "done"})}
+        tool = {"type": "plan_item", "data": json.dumps({"tool_call_info": {"name": "Read"}})}
+        think = {"type": "plan_item", "data": json.dumps({"reasoning_content": "x"})}
+        assert trae_hub_state(run) == "thinking"
+        assert trae_hub_state(done) == "idle"
+        assert trae_hub_state(tool) == "working"
+        assert trae_hub_tool(tool) == "Read"
+        assert trae_hub_state(think) == "thinking"
+        assert trae_hub_state({"type": "timing_events", "data": "{}"}) == ""
+
+    def test_cherry_message_rows(self):
+        from pet.agent_link import cherry_message_state, cherry_message_tool
+        tool_parts = {"parts": [{"type": "dynamic-tool", "toolName": "pwsh"}]}
+        assert cherry_message_state("user", {}) == "thinking"
+        assert cherry_message_state("assistant", tool_parts, "pending") == "working"
+        assert cherry_message_tool(tool_parts) == "pwsh"
+        assert cherry_message_state("assistant", tool_parts, "success") == "idle"
+        assert cherry_message_state("assistant", {}, "paused") == "attention"
+        assert cherry_message_state("assistant", {}, "error") == "error"
+
+
 class TestOpenCodeSqliteTail:
     def test_sqlite_incremental_poll(self, tmp_path):
         """OpenCode 监视器：自建 sqlite event 表，验证 backfill 防护 + 增量轮询。"""
