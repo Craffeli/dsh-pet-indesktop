@@ -262,6 +262,10 @@ def _default_agent_link_data() -> dict:
         "claude": False,
         "cursor": False,
         "opencode": False,
+        "trae": False,
+        "workbuddy": False,
+        "teleagent": False,
+        "cherrystudio": False,
         # 自定义联动 Agent（协议见 docs/AGENT_LINK_PROTOCOL.md §4）：只读监听
         # 用户指定的事件文件，不写外部配置、无需授权弹窗，默认空
         "custom_agents": [],
@@ -301,7 +305,10 @@ def _clean_click_sound_pack(value: Any) -> dict:
 
 
 # 内置联动 Agent 键：custom_agents 的 key 不得与之重复
-_AGENT_LINK_BUILTIN_KEYS = ("dsh", "claude", "cursor", "opencode")
+_AGENT_LINK_BUILTIN_KEYS = (
+    "dsh", "claude", "cursor", "opencode",
+    "trae", "workbuddy", "teleagent", "cherrystudio",
+)
 # 自定义联动 Agent 条目上限（防配置文件被塞爆）
 _CUSTOM_AGENT_MAX = 8
 
@@ -367,6 +374,10 @@ def _clean_agent_link_data(raw: Any) -> dict:
         "claude",
         "cursor",
         "opencode",
+        "trae",
+        "workbuddy",
+        "teleagent",
+        "cherrystudio",
         "sound_enabled",
         "sound_start_enabled",
         "sound_done_enabled",

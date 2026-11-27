@@ -1,5 +1,6 @@
 # -*- coding: utf-8 -*-
-"""多 Agent 状态感知与动作联动监视器模块（DSH / Claude Code / Cursor / OpenCode）。
+"""多 Agent 状态感知与动作联动监视器模块
+（DSH / Claude Code / Cursor / OpenCode / Trae / WorkBuddy / TeleAgent / Cherry Studio）。
 
 设计原则（手册 §8）：
 1. 绝不使用 mtime 盲轮询；
@@ -1013,6 +1014,180 @@ def opencode_event_tool(event_type: str, data_raw: str) -> str:
     if str(part.get("type", "")) != "tool":
         return ""
     return str(part.get("tool", "") or "").strip()
+
+
+def _hub_payload(record: dict) -> dict:
+    """Trae hub 事件把载荷序列化在 ``data`` 字符串里；解析失败按空对象处理。"""
+    raw = record.get("data")
+    if isinstance(raw, dict):
+        return raw
+    if isinstance(raw, str):
+        try:
+            parsed = json.loads(raw)
+        except (ValueError, TypeError):
+            return {}
+        return parsed if isinstance(parsed, dict) else {}
+    return {}
+
+
+def workbuddy_line_state(data: dict) -> str:
+    """WorkBuddy 会话转写（~/.workbuddy/projects/**/*.jsonl）→ 状态。
+
+    - message role=user → thinking；role=assistant（回合收尾文本）→ idle
+    - reasoning → thinking；function_call → working
+    - function_call_result 失败 → error，其余忽略（过程由 function_call 汇报）
+    其余记录类型（session-meta / ai-title / file-history-snapshot）忽略。"""
+    record_type = str(data.get("type") or "")
+    if record_type == "message":
+        role = str(data.get("role") or "").lower()
+        if role == "user":
+            return "thinking"
+        if role == "assistant":
+            return "idle"
+        return ""
+    if record_type == "reasoning":
+        return "thinking"
+    if record_type == "function_call":
+        return "working"
+    if record_type == "function_call_result":
+        if str(data.get("status") or "").lower() in ("error", "failed"):
+            return "error"
+        return ""
+    return ""
+
+
+def workbuddy_line_tool(data: dict) -> str:
+    """WorkBuddy function_call 记录的工具名（如 Bash / Read / present_files）。"""
+    if str(data.get("type") or "") != "function_call":
+        return ""
+    return str(data.get("name") or "").strip()
+
+
+def trae_hub_state(record: dict) -> str:
+    """Trae hub 事件缓存（~/.trae-cn/hub_event_cache/TraeCode/**/*.jsonl）→ 状态。
+
+    - metadata：metadata_status=done → idle（回合收尾），init/in_progress → thinking
+    - plan_item：带 tool_call_info.name → working；纯推理 → thinking
+    - token_usage → thinking
+    其余（timing_events / context_usage / model_config / message_context_update）忽略。"""
+    record_type = str(record.get("type") or "")
+    payload = _hub_payload(record)
+    if record_type == "metadata":
+        status = str(payload.get("metadata_status") or "").lower()
+        if status == "done":
+            return "idle"
+        if status in ("init", "in_progress", "running"):
+            return "thinking"
+        return ""
+    if record_type == "plan_item":
+        info = payload.get("tool_call_info")
+        if isinstance(info, dict) and str(info.get("name") or "").strip():
+            return "working"
+        if str(payload.get("reasoning_content") or "").strip() \
+                or str(payload.get("thought") or "").strip():
+            return "thinking"
+        agent_status = payload.get("agent_status")
+        if isinstance(agent_status, dict) and str(agent_status.get("status") or "").lower() in (
+                "completed", "done", "finished"):
+            return "idle"
+        return ""
+    if record_type == "token_usage":
+        return "thinking"
+    return ""
+
+
+def trae_hub_tool(record: dict) -> str:
+    """Trae plan_item 记录的工具名（Read / Write / RunCommand 等）。"""
+    if str(record.get("type") or "") != "plan_item":
+        return ""
+    info = _hub_payload(record).get("tool_call_info")
+    if not isinstance(info, dict):
+        return ""
+    return str(info.get("name") or "").strip()
+
+
+def teleagent_part_state(part: dict) -> str:
+    """TeleAgent（OpenCode 内核）part 表 → 状态（与 opencode_event_state 同口径）。
+
+    step-start → working；reasoning → thinking；step-finish(reason≠tool-calls) → idle；
+    tool part 失败 → error，其余工具执行 → working。"""
+    part_type = str(part.get("type") or "")
+    if part_type == "step-start":
+        return "working"
+    if part_type == "reasoning":
+        return "thinking"
+    if part_type == "tool":
+        state = part.get("state")
+        if isinstance(state, dict) and str(state.get("status") or "").lower() in ("error", "failed"):
+            return "error"
+        return "working"
+    if part_type == "step-finish":
+        # reason=tool-calls：模型停笔等工具结果，回合尚未结束
+        return "" if str(part.get("reason") or "") == "tool-calls" else "idle"
+    return ""
+
+
+def teleagent_part_tool(part: dict) -> str:
+    """TeleAgent tool part 的工具名（bash / read / edit 等）。"""
+    if str(part.get("type") or "") != "tool":
+        return ""
+    return str(part.get("tool") or "").strip()
+
+
+def _cherry_parts(data: dict) -> list:
+    if not isinstance(data, dict):
+        return []
+    parts = data.get("parts")
+    return parts if isinstance(parts, list) else []
+
+
+def _cherry_part_tool_name(part: dict) -> str:
+    part_type = str(part.get("type") or "")
+    if part_type == "dynamic-tool":
+        return str(part.get("toolName") or "").strip()
+    if part_type.startswith("tool-"):
+        return str(part.get("toolName") or part_type[5:]).strip()
+    if part_type in ("tool", "tool-call", "tool_call", "tool_use"):
+        return str(part.get("toolName") or part.get("name") or "").strip()
+    return ""
+
+
+def cherry_message_state(role: str, data: dict, status: str = "") -> str:
+    """Cherry Studio 消息行（agent_session_message / message）→ 状态。
+
+    行会在流式过程中原地更新（status: pending → success/error/paused），
+    因此按当前 status 判定：成功收尾 → idle；error → error；paused → attention；
+    其余（生成中）按 parts 汇报 working/thinking。"""
+    role_value = str(role or "").lower()
+    if role_value == "user":
+        return "thinking"
+    if role_value != "assistant":
+        return ""
+    status_value = str(status or "").lower()
+    if status_value == "error":
+        return "error"
+    if status_value == "paused":
+        return "attention"
+    if status_value in ("success", "completed", "done"):
+        return "idle"
+    parts = _cherry_parts(data)
+    for part in parts:
+        if isinstance(part, dict) and _cherry_part_tool_name(part):
+            return "working"
+    for part in parts:
+        if isinstance(part, dict) and str(part.get("type") or "") in ("reasoning", "step-start"):
+            return "thinking"
+    return "thinking"
+
+
+def cherry_message_tool(data: dict) -> str:
+    """Cherry Studio 消息行里第一个工具名（没有则空串）。"""
+    for part in _cherry_parts(data):
+        if isinstance(part, dict):
+            name = _cherry_part_tool_name(part)
+            if name:
+                return name
+    return ""
 
 
 # 桥目录陈旧文件的清理口径（N1，2026-09-29）：
@@ -3113,6 +3288,422 @@ class OpenCodeMonitor(BaseAgentMonitor):
                 self._emit_tool(tool, emit_gen)
 
 
+class _JsonlTreeMonitor(BaseAgentMonitor):
+    """目录树 JSONL 直读监视器（WorkBuddy / Trae 共用）。
+
+    每 30s 扫描一次根目录下最近 24h 有写入的 ``*.jsonl``（最多 50 个），用字节
+    偏移增量 tail；子类只负责把单条记录映射成状态/工具。统一协议通道
+    （``agent-events/<key>.jsonl``）照常由基类消费，两条通道可并存。
+    """
+
+    _SCAN_INTERVAL_S = 30.0
+    _MAX_FILES = 50
+    _MAX_AGE_S = 86400.0
+
+    def __init__(self, agent_key: str, config_dir: Path, root: Path, parent=None) -> None:
+        super().__init__(agent_key, config_dir, parent)
+        self.root = Path(root).expanduser()
+        self._tailers: dict[str, ByteOffsetTailer] = {}
+        self._dir_mtimes: dict[str, int] = {}
+        self._last_scan = 0.0
+
+    def _worker_started(self) -> None:
+        self._tailers = {}
+        self._dir_mtimes = {}
+        self._last_scan = 0.0
+
+    def _on_line(self, data: dict, gen: int) -> None:
+        raise NotImplementedError
+
+    def _tree_changed(self) -> bool:
+        """一级子目录 mtime 是否变化（新会话文件/删除文件）——用于 1.5s 快发现。
+
+        「按 mtime 判定变化」在这里只驱动**目录重扫**，不拿 mtime 推断 Agent
+        状态：会话文件内容追加不改目录 mtime，状态的权威来源仍是文件内容。"""
+        changed = False
+        try:
+            subdirs = [path for path in self.root.iterdir() if path.is_dir()]
+        except OSError:
+            return False
+        live = {str(path) for path in subdirs}
+        for key in [key for key in self._dir_mtimes if key not in live]:
+            del self._dir_mtimes[key]
+            changed = True
+        for subdir in subdirs:
+            try:
+                mtime = subdir.stat().st_mtime_ns
+            except OSError:
+                continue
+            key = str(subdir)
+            if self._dir_mtimes.get(key) != mtime:
+                self._dir_mtimes[key] = mtime
+                changed = True
+        return changed
+
+    def _poll(self, gen: int | None = None) -> None:
+        super()._poll(gen=gen)
+        emit_gen = self._emit_gen if gen is None else gen
+        if not self.root.is_dir():
+            return
+
+        now = time.time()
+        # 目录发现降频：避免每 1.5s 递归 glob 整棵会话目录树；但一级子目录 mtime
+        # 变化（新会话文件出现）会立即触发重扫，新任务不会被 30s 窗口拖慢。
+        if self._tree_changed() or now - self._last_scan >= self._SCAN_INTERVAL_S:
+            self._last_scan = now
+            try:
+                files = []
+                for path in self.root.glob("**/*.jsonl"):
+                    try:
+                        if path.stat().st_mtime >= now - self._MAX_AGE_S:
+                            files.append(path)
+                    except OSError:
+                        pass
+                files.sort(key=_safe_mtime, reverse=True)
+                candidates = {str(path) for path in files[: self._MAX_FILES]}
+                for stale in [key for key in self._tailers if key not in candidates]:
+                    del self._tailers[stale]
+                for file_key in candidates:
+                    if file_key not in self._tailers:
+                        self._tailers[file_key] = ByteOffsetTailer(file_key)
+            except Exception as exc:
+                log.debug("%s monitor 扫描异常: %s", self.agent_key, exc)
+
+        for tailer in list(self._tailers.values()):
+            for line in tailer.read_new_lines():
+                try:
+                    data = json.loads(line)
+                except (ValueError, TypeError):
+                    continue
+                if not isinstance(data, dict):
+                    continue
+                self._emit_unified_event(data)
+                self._on_line(data, emit_gen)
+
+
+class WorkBuddyMonitor(_JsonlTreeMonitor):
+    """WorkBuddy 监视器。
+
+    只读 WorkBuddy（CodeBuddy 内核）的官方会话转写
+    ``~/.workbuddy/projects/**/<session>.jsonl``：message / reasoning /
+    function_call / function_call_result，无需安装任何插件、不写外部配置。
+    """
+
+    def __init__(self, config_dir: Path, parent=None, base_dir: Path | None = None) -> None:
+        super().__init__(
+            "workbuddy", config_dir,
+            base_dir or (Path.home() / ".workbuddy" / "projects"), parent,
+        )
+
+    def _on_line(self, data: dict, gen: int) -> None:
+        tool = workbuddy_line_tool(data)
+        if tool:
+            self._emit_tool(tool, gen)
+        state = workbuddy_line_state(data)
+        if state:
+            self._emit_state(state, gen)
+
+
+class TraeMonitor(_JsonlTreeMonitor):
+    """Trae 监视器。
+
+    只读 Trae 的本地 hub 事件缓存
+    ``~/.trae-cn/hub_event_cache/TraeCode/**/<task>.jsonl``：metadata（回合
+    in_progress/done）、plan_item（推理与工具调用）、token_usage。
+    不读取 Trae 的加密会话库，也不写任何外部配置。
+    """
+
+    def __init__(self, config_dir: Path, parent=None, base_dir: Path | None = None) -> None:
+        super().__init__(
+            "trae", config_dir,
+            base_dir or (Path.home() / ".trae-cn" / "hub_event_cache" / "TraeCode"), parent,
+        )
+
+    def _on_line(self, data: dict, gen: int) -> None:
+        tool = trae_hub_tool(data)
+        if tool:
+            self._emit_tool(tool, gen)
+        state = trae_hub_state(data)
+        if state:
+            self._emit_state(state, gen)
+
+
+class TeleAgentMonitor(BaseAgentMonitor):
+    """TeleAgent 监视器（OpenCode 内核）。
+
+    只读 ``~/.local/share/TeleAgent/users/*/teleagent.db`` 的 part / message 表
+    （rowid 增量轮询）；按 session.parent_id 过滤子代理会话，避免每派发一个
+    子代理就把主会话判成完成。无需安装插件、不写外部配置。
+    """
+
+    _SCAN_INTERVAL_S = 30.0
+
+    def __init__(self, config_dir: Path, parent=None, users_dir: Path | None = None) -> None:
+        super().__init__("teleagent", config_dir, parent)
+        self.users_dir = Path(
+            users_dir or (Path.home() / ".local" / "share" / "TeleAgent" / "users")
+        ).expanduser()
+        self._db_path: Path | None = None
+        self._db_file_id: tuple[int, ...] | None = None
+        self._db_ready = False
+        self._last_part_rowid = 0
+        self._last_msg_rowid = 0
+        self._last_scan = 0.0
+
+    def _worker_started(self) -> None:
+        self._db_path = None
+        self._reset_db()
+
+    def _reset_db(self) -> None:
+        self._db_file_id = None
+        self._db_ready = False
+        self._last_part_rowid = 0
+        self._last_msg_rowid = 0
+
+    def _find_db(self, now: float) -> Path | None:
+        if self._db_path is not None and self._db_path.is_file() \
+                and now - self._last_scan < self._SCAN_INTERVAL_S:
+            return self._db_path
+        self._last_scan = now
+        newest: Path | None = None
+        newest_mtime = -1.0
+        try:
+            for path in self.users_dir.glob("*/teleagent.db"):
+                if not path.is_file():
+                    continue
+                mtime = _safe_mtime(path)
+                if mtime > newest_mtime:
+                    newest, newest_mtime = path, mtime
+        except OSError:
+            return self._db_path
+        return newest
+
+    @staticmethod
+    def _root_sessions(db, session_ids: set[str]) -> dict[str, bool]:
+        if not session_ids:
+            return {}
+        try:
+            marks = ",".join("?" * len(session_ids))
+            return {
+                str(sid): parent_id is None
+                for sid, parent_id in db.execute(
+                    f"SELECT id, parent_id FROM session WHERE id IN ({marks})",
+                    tuple(session_ids),
+                )
+            }
+        except Exception:
+            # 老库没有 session 表等异常：全部当主会话（保守不丢事件）
+            return {}
+
+    def _poll(self, gen: int | None = None) -> None:
+        super()._poll(gen=gen)
+        emit_gen = self._emit_gen if gen is None else gen
+
+        db_path = self._find_db(time.time())
+        if db_path is None:
+            return
+        if db_path != self._db_path:
+            self._db_path = db_path
+            self._reset_db()
+        try:
+            stat = db_path.stat()
+            file_id = (stat.st_dev, stat.st_ino)
+            if file_id != self._db_file_id:
+                self._db_file_id = file_id
+                self._db_ready = False
+        except OSError:
+            return
+
+        import sqlite3
+
+        try:
+            db = sqlite3.connect(f"file:{db_path.as_posix()}?mode=ro", uri=True)
+        except Exception as exc:
+            log.debug("TeleAgent sqlite 打开失败: %s", exc)
+            return
+        try:
+            if not self._db_ready:
+                # backfill 防护：启动时跳到当前末尾，不回放历史事件
+                self._last_part_rowid = db.execute(
+                    "SELECT COALESCE(MAX(rowid), 0) FROM part"
+                ).fetchone()[0]
+                self._last_msg_rowid = db.execute(
+                    "SELECT COALESCE(MAX(rowid), 0) FROM message"
+                ).fetchone()[0]
+                self._db_ready = True
+                return
+
+            # 用户消息先于助手 parts 消费：user 行 → thinking，助手过程交给 part 表
+            msg_rows = db.execute(
+                "SELECT rowid, session_id, data FROM message WHERE rowid > ? "
+                "ORDER BY rowid LIMIT 200",
+                (self._last_msg_rowid,),
+            ).fetchall()
+            part_rows = db.execute(
+                "SELECT rowid, session_id, data FROM part WHERE rowid > ? "
+                "ORDER BY rowid LIMIT 200",
+                (self._last_part_rowid,),
+            ).fetchall()
+
+            session_ids = {
+                str(sid) for _, sid, _ in (*msg_rows, *part_rows) if sid
+            }
+            root_sessions = self._root_sessions(db, session_ids)
+        except Exception as exc:
+            log.debug("TeleAgent sqlite 读取异常: %s", exc)
+            return
+        finally:
+            db.close()
+
+        def is_child(session_id: str) -> bool:
+            return bool(session_id) and root_sessions.get(session_id) is False
+
+        for rowid, sid, data_raw in msg_rows:
+            self._last_msg_rowid = max(self._last_msg_rowid, int(rowid))
+            if is_child(str(sid or "")):
+                continue
+            try:
+                record = json.loads(str(data_raw))
+            except (ValueError, TypeError):
+                continue
+            if not isinstance(record, dict):
+                continue
+            if str(record.get("role") or "").lower() == "user":
+                self._emit_state("thinking", emit_gen)
+
+        for rowid, sid, data_raw in part_rows:
+            self._last_part_rowid = max(self._last_part_rowid, int(rowid))
+            if is_child(str(sid or "")):
+                continue
+            try:
+                part = json.loads(str(data_raw))
+            except (ValueError, TypeError):
+                continue
+            if not isinstance(part, dict):
+                continue
+            tool = teleagent_part_tool(part)
+            if tool:
+                self._emit_tool(tool, emit_gen)
+            state = teleagent_part_state(part)
+            if state:
+                self._emit_state(state, emit_gen)
+
+
+def _cherrystudio_db_path() -> Path:
+    """Cherry Studio 本地数据库（各平台官方用户数据目录）。"""
+    if sys.platform.startswith("win"):
+        base = Path(os.environ.get("APPDATA") or (Path.home() / "AppData" / "Roaming"))
+    elif sys.platform == "darwin":
+        base = Path.home() / "Library" / "Application Support"
+    else:
+        base = Path(os.environ.get("XDG_CONFIG_HOME") or (Path.home() / ".config"))
+    return base / "CherryStudio" / "Data" / "cherrystudio.sqlite"
+
+
+class CherryStudioMonitor(BaseAgentMonitor):
+    """Cherry Studio 监视器。
+
+    只读 ``<用户数据>/CherryStudio/Data/cherrystudio.sqlite`` 的
+    ``agent_session_message``（Agent 模式）与 ``message``（聊天模式）表，
+    按 ``updated_at`` 增量轮询——行会在流式过程中原地更新（pending → success），
+    因此不需要插件，也不写外部配置。
+    """
+
+    def __init__(self, config_dir: Path, parent=None, db_path: Path | None = None) -> None:
+        super().__init__("cherrystudio", config_dir, parent)
+        self.db_path = Path(db_path or _cherrystudio_db_path()).expanduser()
+        self._db_file_id: tuple[int, ...] | None = None
+        self._db_ready = False
+        self._last_agent_updated = 0
+        self._last_chat_updated = 0
+
+    def _worker_started(self) -> None:
+        self._db_file_id = None
+        self._db_ready = False
+        self._last_agent_updated = 0
+        self._last_chat_updated = 0
+
+    def _emit_row(self, role: str, data_raw, status: str, gen: int) -> None:
+        try:
+            data = json.loads(str(data_raw))
+        except (ValueError, TypeError):
+            data = {}
+        if not isinstance(data, dict):
+            data = {}
+        state = cherry_message_state(role, data, status)
+        if state == "working":
+            tool = cherry_message_tool(data)
+            if tool:
+                self._emit_tool(tool, gen)
+        if state:
+            self._emit_state(state, gen)
+
+    def _poll(self, gen: int | None = None) -> None:
+        super()._poll(gen=gen)
+        emit_gen = self._emit_gen if gen is None else gen
+
+        if not self.db_path.is_file():
+            return
+        try:
+            stat = self.db_path.stat()
+            file_id = (stat.st_dev, stat.st_ino)
+            if file_id != self._db_file_id:
+                self._db_file_id = file_id
+                self._db_ready = False
+        except OSError:
+            return
+
+        import sqlite3
+
+        try:
+            db = sqlite3.connect(f"file:{self.db_path.as_posix()}?mode=ro", uri=True)
+        except Exception as exc:
+            log.debug("Cherry Studio sqlite 打开失败: %s", exc)
+            return
+        try:
+            if not self._db_ready:
+                # backfill 防护：启动时跳到当前末尾，不回放历史消息
+                self._last_agent_updated = db.execute(
+                    "SELECT COALESCE(MAX(updated_at), 0) FROM agent_session_message"
+                ).fetchone()[0]
+                self._last_chat_updated = db.execute(
+                    "SELECT COALESCE(MAX(updated_at), 0) FROM message"
+                ).fetchone()[0]
+                self._db_ready = True
+                return
+
+            # 两张表分别容错：旧版 Cherry Studio 可能缺 agent_* 表或 deleted_at 列，
+            # 一个表不可读不应把另一个模式的通道一起拖死。
+            agent_rows = []
+            try:
+                agent_rows = db.execute(
+                    "SELECT role, data, status, updated_at FROM agent_session_message "
+                    "WHERE updated_at > ? ORDER BY updated_at LIMIT 200",
+                    (self._last_agent_updated,),
+                ).fetchall()
+            except Exception as exc:
+                log.debug("Cherry Studio agent_session_message 读取异常: %s", exc)
+            chat_rows = []
+            try:
+                chat_rows = db.execute(
+                    "SELECT role, data, status, updated_at FROM message "
+                    "WHERE updated_at > ? AND COALESCE(deleted_at, 0) = 0 "
+                    "ORDER BY updated_at LIMIT 200",
+                    (self._last_chat_updated,),
+                ).fetchall()
+            except Exception as exc:
+                log.debug("Cherry Studio message 读取异常: %s", exc)
+        finally:
+            db.close()
+
+        for role, data_raw, status, updated_at in agent_rows:
+            self._last_agent_updated = max(self._last_agent_updated, int(updated_at or 0))
+            self._emit_row(str(role or ""), data_raw, str(status or ""), emit_gen)
+        for role, data_raw, status, updated_at in chat_rows:
+            self._last_chat_updated = max(self._last_chat_updated, int(updated_at or 0))
+            self._emit_row(str(role or ""), data_raw, str(status or ""), emit_gen)
+
+
 class CustomAgentMonitor(BaseAgentMonitor):
     """自定义联动 Agent 监视器（agent_link.custom_agents 配置驱动）。"""
 
@@ -3186,13 +3777,13 @@ class AgentLinkManager(QObject):
     """多 Agent 联动总调度管理器。
 
     装配与编排：
-    - 装配：4 内置 + 配置驱动的自定义监视器，并完成信号接线（DSH 监视器是
+    - 装配：8 内置 + 配置驱动的自定义监视器，并完成信号接线（DSH 监视器是
       桥目录的唯一读方：信号分派 + dsh_state 收敛器两个消费者共享同一份解析）；
     - 监视器生命周期：pause / resume / shutdown / apply_config；
     - set_enabled 安装/卸载编排（授权弹窗、后台安装、hooks 注入/移除）；
     - 对既有调用面（PetWindow / AppShell / ProactiveScreenWatcher / 测试）的薄转发。
     去抖/节流/完成确认与气泡/音效/动画调度都在本类内实现。
-    挂载于 PetWindow，持有 4 个 Agent 的监视器，并根据状态驱动桌宠动作与气泡。
+    挂载于 PetWindow，持有 8 个内置 Agent 的监视器，并根据状态驱动桌宠动作与气泡。
     """
 
     install_finished = Signal(str, bool, str, int)  # (agent_key, ok, message, install_token)
@@ -3205,7 +3796,11 @@ class AgentLinkManager(QObject):
     dsh_user_message = Signal(str, str)
 
     # 联动气泡展示名
-    AGENT_NAMES = {"dsh": "DSH", "claude": "Claude Code", "cursor": "Cursor", "opencode": "OpenCode"}
+    AGENT_NAMES = {
+        "dsh": "DSH", "claude": "Claude Code", "cursor": "Cursor", "opencode": "OpenCode",
+        "trae": "Trae", "workbuddy": "WorkBuddy", "teleagent": "TeleAgent",
+        "cherrystudio": "Cherry Studio",
+    }
     # 过程汇报：工具名 → 用户可读文案（不展示原始命令/路径）
     TOOL_LABELS = {
         "read": "正在读文件", "write": "正在写文件", "edit": "正在改代码",
@@ -3217,6 +3812,14 @@ class AgentLinkManager(QObject):
         "fetch": "正在查网页", "browser": "正在查网页", "web_fetch": "正在查网页",
         "web_search": "正在查网页", "read_page": "正在读网页",
         "task": "正在派活给子代理", "todowrite": "正在列计划",
+        "taskcreate": "正在列计划", "taskupdate": "正在更新计划",
+        "runcommand": "正在跑命令", "run_command": "正在跑命令",
+        "deletefile": "正在删文件", "delete_file": "正在删文件",
+        "listdir": "正在看目录", "list_dir": "正在看目录",
+        "searchfiles": "正在搜索", "search_files": "正在搜索",
+        "present_files": "正在整理文件",
+        "fs_read": "正在读文件", "fs_write": "正在写文件", "fs_edit": "正在改代码",
+        "fs_search": "正在搜索", "fs_list": "正在看目录",
     }
     _UNKNOWN_TOOL_LABEL = "正在调用工具"
     #: 会话级缓存的条目上限（缺陷 23）：``_session_meta_cache`` 的 key 是
@@ -3351,6 +3954,10 @@ class AgentLinkManager(QObject):
             "claude": ClaudeCodeMonitor("claude", self.config_dir, self),
             "cursor": CursorMonitor(self.config_dir, self),
             "opencode": OpenCodeMonitor(self.config_dir, self),
+            "trae": TraeMonitor(self.config_dir, self),
+            "workbuddy": WorkBuddyMonitor(self.config_dir, self),
+            "teleagent": TeleAgentMonitor(self.config_dir, self),
+            "cherrystudio": CherryStudioMonitor(self.config_dir, self),
             }
         # 自定义联动 Agent：配置驱动的只读监视器（key/path 已在 config 清洗时
         # 保证合法唯一）；显示名合并进实例级 agent_names，类级 AGENT_NAMES
@@ -3515,6 +4122,10 @@ class AgentLinkManager(QObject):
         hints = {
             "cursor": ("Cursor", Path.home() / ".cursor" / "projects"),
             "opencode": ("OpenCode", Path.home() / ".local" / "share" / "opencode" / "opencode.db"),
+            "trae": ("Trae", Path.home() / ".trae-cn" / "hub_event_cache"),
+            "workbuddy": ("WorkBuddy", Path.home() / ".workbuddy" / "projects"),
+            "teleagent": ("TeleAgent", Path.home() / ".local" / "share" / "TeleAgent"),
+            "cherrystudio": ("Cherry Studio", _cherrystudio_db_path().parent),
         }
         item = hints.get(agent_key)
         if not item:
@@ -4388,6 +4999,10 @@ class AgentLinkManager(QObject):
     AGENT_PROCESS_HINTS = {
         "opencode": ("opencode.exe",),
         "cursor": ("cursor.exe",),
+        "trae": ("trae cn.exe", "trae.exe"),
+        "workbuddy": ("workbuddy.exe",),
+        "teleagent": ("teleagent.exe",),
+        "cherrystudio": ("cherry studio.exe", "cherrystudio.exe"),
     }
     AGENT_TITLE_HINTS = {
         "dsh": ("deepseek harness",),

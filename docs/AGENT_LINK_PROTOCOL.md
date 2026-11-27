@@ -102,7 +102,7 @@ DSH 通道只有**一个读方**：`DshMonitor`（一个 `DirGlobTailer` + 一�
 4. **绝不阻塞宿主**：写事件失败时静默放弃——联动是锦上添花，不能影响 Agent 本体（参考 `integrations/dsh-pet-bridge/index.js` 的做法）。
 5. **隐私红线**：只写状态/事件元数据（状态、事件名、工具名），**不要**把代码内容、命令全文、文件内容、屏幕信息写进事件文件。
 
-## 3. 内置四种接入模式（现状分析）
+## 3. 内置八种接入模式（现状分析）
 
 | Agent | 模式 | 事件来源 | 是否写外部配置 |
 |---|---|---|---|
@@ -110,6 +110,10 @@ DSH 通道只有**一个读方**：`DshMonitor`（一个 `DirGlobTailer` + 一�
 | Claude Code | hooks 注入 | 向 `~/.claude/settings.json` 注入官方 hooks，落地脚本把事件写 `agent-events/claude.jsonl` | 注入/卸载 hooks（弹窗同意） |
 | Cursor | transcript 直读 | 直接 tail `~/.cursor/projects/**/agent-transcripts/*.jsonl`（官方转写文件，按 role/content 解析） | 否 |
 | OpenCode | 数据库直读 | 只读 `~/.local/share/opencode/opencode.db` 的 `event` 表（rowid 增量） | 否 |
+| Trae | hub 事件直读 | 直接 tail `~/.trae-cn/hub_event_cache/TraeCode/**/*.jsonl`（metadata / plan_item / token_usage；不读加密会话库） | 否 |
+| WorkBuddy | transcript 直读 | 直接 tail `~/.workbuddy/projects/**/*.jsonl`（message / reasoning / function_call / function_call_result） | 否 |
+| TeleAgent | 数据库直读 | 只读 `~/.local/share/TeleAgent/users/*/teleagent.db` 的 `part` / `message` 表（rowid 增量，按 session.parent_id 过滤子代理） | 否 |
+| Cherry Studio | 数据库直读 | 只读 `<用户数据>/CherryStudio/Data/cherrystudio.sqlite` 的 `agent_session_message`（Agent 模式）/ `message`（聊天模式）表（updated_at 增量） | 否 |
 
 给新 Agent 选择接入模式的判断依据：
 
