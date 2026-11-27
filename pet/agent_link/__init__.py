@@ -3409,27 +3409,102 @@ class WorkBuddyMonitor(_JsonlTreeMonitor):
 
 
 class TraeMonitor(_JsonlTreeMonitor):
-    """Trae 监视器。
+    """Trae 监视器（三条通道，按精确度从高到低）。
 
-    只读 Trae 的本地 hub 事件缓存
-    ``~/.trae-cn/hub_event_cache/TraeCode/**/<task>.jsonl``：metadata（回合
-    in_progress/done）、plan_item（推理与工具调用）、token_usage。
-    不读取 Trae 的加密会话库，也不写任何外部配置。
+    1. **官方 Hook 桥**：统一协议文件 ``agent-events/trae.jsonl``
+       （见 ``integrations/trae-pet-hook``）——开始/工具/完成都精确；
+    2. **hub 事件缓存**：``~/.trae-cn/hub_event_cache/TraeCode/**``，仅 SOLO/Agent
+       任务产出；
+    3. **memory 摘要回退（无需任何插件/配置）**：
+       ``~/.trae-cn/memory/projects/**/session_memory_*.jsonl`` 每个回合结束后
+       追加一行摘要。只能报「这一轮完成了」，没有开始/工具细节，而且是在回复
+       写完之后才触发——这是本回退的明确限制。
+
+    精确通道（1/2）在最近 120s 内有事件时，回退通道静默，避免同一回合双报。
     """
 
-    def __init__(self, config_dir: Path, parent=None, base_dir: Path | None = None) -> None:
+    _MEMORY_SCAN_INTERVAL_S = 5.0
+    _MEMORY_MAX_FILES = 50
+    _MEMORY_MAX_AGE_S = 86400.0
+    _PRECISE_QUIET_S = 120.0
+
+    def __init__(self, config_dir: Path, parent=None, base_dir: Path | None = None,
+                 memory_dir: Path | None = None) -> None:
         super().__init__(
             "trae", config_dir,
             base_dir or (Path.home() / ".trae-cn" / "hub_event_cache" / "TraeCode"), parent,
         )
+        self.memory_root = Path(
+            memory_dir or (Path.home() / ".trae-cn" / "memory" / "projects")
+        ).expanduser()
+        self._mem_tailers: dict[str, ByteOffsetTailer] = {}
+        self._mem_last_scan = 0.0
+        self._precise_seen_at = 0.0
+
+    def _worker_started(self) -> None:
+        super()._worker_started()
+        self._mem_tailers = {}
+        self._mem_last_scan = 0.0
+        self._precise_seen_at = 0.0
+
+    def _on_parsed_record(self, data: dict, cursor: tuple | None = None) -> None:
+        # 统一协议通道（Hook 桥）读到记录：精确通道活跃，memory 回退静默。
+        self._precise_seen_at = time.time()
 
     def _on_line(self, data: dict, gen: int) -> None:
+        self._precise_seen_at = time.time()
         tool = trae_hub_tool(data)
         if tool:
             self._emit_tool(tool, gen)
         state = trae_hub_state(data)
         if state:
             self._emit_state(state, gen)
+
+    def _poll(self, gen: int | None = None) -> None:
+        super()._poll(gen=gen)
+        emit_gen = self._emit_gen if gen is None else gen
+        self._poll_memory(emit_gen)
+
+    def _poll_memory(self, emit_gen: int) -> None:
+        if not self.memory_root.is_dir():
+            return
+        now = time.time()
+        if now - self._mem_last_scan >= self._MEMORY_SCAN_INTERVAL_S:
+            self._mem_last_scan = now
+            try:
+                files = []
+                for path in self.memory_root.glob("**/session_memory_*.jsonl"):
+                    try:
+                        if path.stat().st_mtime >= now - self._MEMORY_MAX_AGE_S:
+                            files.append(path)
+                    except OSError:
+                        pass
+                files.sort(key=_safe_mtime, reverse=True)
+                candidates = {str(path) for path in files[: self._MEMORY_MAX_FILES]}
+                for stale in [key for key in self._mem_tailers if key not in candidates]:
+                    del self._mem_tailers[stale]
+                for file_key in candidates:
+                    if file_key not in self._mem_tailers:
+                        self._mem_tailers[file_key] = ByteOffsetTailer(file_key)
+            except Exception as exc:
+                log.debug("Trae memory 扫描异常: %s", exc)
+
+        for tailer in list(self._mem_tailers.values()):
+            for line in tailer.read_new_lines():
+                # 精确通道刚有事件：这条回合摘要不再重复报。
+                if now - self._precise_seen_at < self._PRECISE_QUIET_S:
+                    continue
+                try:
+                    data = json.loads(line)
+                except (ValueError, TypeError):
+                    continue
+                if not isinstance(data, dict):
+                    continue
+                if not (data.get("message_summary_time") or data.get("intent")):
+                    continue
+                # 摘要行是回合结束的落盘：先置忙再收尾，让桌宠报一次「干完」。
+                self._emit_state("thinking", emit_gen)
+                self._emit_state("idle", emit_gen)
 
 
 class TeleAgentMonitor(BaseAgentMonitor):

@@ -110,7 +110,7 @@ DSH 通道只有**一个读方**：`DshMonitor`（一个 `DirGlobTailer` + 一�
 | Claude Code | hooks 注入 | 向 `~/.claude/settings.json` 注入官方 hooks，落地脚本把事件写 `agent-events/claude.jsonl` | 注入/卸载 hooks（弹窗同意） |
 | Cursor | transcript 直读 | 直接 tail `~/.cursor/projects/**/agent-transcripts/*.jsonl`（官方转写文件，按 role/content 解析） | 否 |
 | OpenCode | 数据库直读 | 只读 `~/.local/share/opencode/opencode.db` 的 `event` 表（rowid 增量） | 否 |
-| Trae | hub 事件直读 | 直接 tail `~/.trae-cn/hub_event_cache/TraeCode/**/*.jsonl`（metadata / plan_item / token_usage；不读加密会话库） | 否 |
+| Trae | hub + Hook + memory 回退 | 优先官方 Hook 桥（`integrations/trae-pet-hook` → `agent-events/trae.jsonl`）；其次 tail `~/.trae-cn/hub_event_cache/TraeCode/**/*.jsonl`（SOLO/Agent 任务）；两者都没有时读 `~/.trae-cn/memory/projects/**/session_memory_*.jsonl` 的回合摘要（无插件回退，只能报「这一轮完成」） | Hook 需要在 Trae 设置里启用；回退通道不写外部配置 |
 | WorkBuddy | transcript 直读 | 直接 tail `~/.workbuddy/projects/**/*.jsonl`（message / reasoning / function_call / function_call_result） | 否 |
 | TeleAgent | 数据库直读 | 只读 `~/.local/share/TeleAgent/users/*/teleagent.db` 的 `part` / `message` 表（rowid 增量，按 session.parent_id 过滤子代理） | 否 |
 | Cherry Studio | 数据库直读 | 只读 `<用户数据>/CherryStudio/Data/cherrystudio.sqlite` 的 `agent_session_message`（Agent 模式）/ `message`（聊天模式）表（updated_at 增量） | 否 |

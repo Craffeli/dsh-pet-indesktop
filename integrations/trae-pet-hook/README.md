@@ -46,6 +46,19 @@ tool_response、命令全文或文件内容。脚本任何异常都静默 `exit 
   带 `config.json` 的目录；也可用环境变量 `DSH_PET_AGENT_EVENTS_DIR` 直接指定
   `agent-events` 目录。
 
+## 无插件回退（默认可用）
+
+即使不启用本文的 Hook，桌宠内置的 `TraeMonitor` 也会读取
+`~/.trae-cn/memory/projects/**/session_memory_*.jsonl` 的回合摘要。它不需要任何
+Trae 插件/配置，但**限制明确**：
+
+- 粒度是**一个回合一次**：只有「这一轮完成了」，没有开始、工具、过程细节；
+- 触发时机在回复**写完之后**（memory 摘要落盘时），不是实时开始；
+- 依赖 Trae 的 memory 功能正常写摘要；
+- Hook 或 hub 通道在最近 120s 内有事件时，回退会自动静默，避免同一回合双报。
+
+要实时/精确，仍然建议启用上面的官方 Hook。
+
 ## 与 hub_event_cache 的关系
 
 桌宠自带的 `TraeMonitor` 也会读 Trae 的 `hub_event_cache`（SOLO/Agent 任务产物）。

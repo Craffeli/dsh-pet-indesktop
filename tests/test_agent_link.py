@@ -1135,6 +1135,44 @@ class TestDesktopAgentMappers:
         assert cherry_message_state("assistant", {}, "error") == "error"
 
 
+class TestTraeMemoryFallback:
+    """Trae 无插件回退：读 memory 回合摘要，只能报「这一轮完成」。"""
+
+    def _monitor(self, tmp_path):
+        from PySide6.QtWidgets import QApplication
+        from pet.agent_link import TraeMonitor
+        QApplication.instance() or QApplication([])
+        hub = tmp_path / "hub"
+        hub.mkdir()
+        day = tmp_path / "memory" / "proj" / "20260101"
+        day.mkdir(parents=True)
+        summary = day / "session_memory_s1.jsonl"
+        summary.touch()
+        mon = TraeMonitor(tmp_path / "cfg", base_dir=hub, memory_dir=tmp_path / "memory")
+        states = []
+        mon.state_changed.connect(lambda k, s: states.append((k, s)))
+        mon._worker_started()
+        mon._poll()  # 首次扫描建立 tailer，历史内容跳过
+        return mon, summary, states
+
+    def test_memory_summary_emits_one_done(self, tmp_path):
+        mon, summary, states = self._monitor(tmp_path)
+        with open(summary, "a", encoding="utf-8") as fh:
+            fh.write(json.dumps({
+                "intent": "x", "outcome": "y", "message_summary_time": "2026-01-01 00:00:00",
+            }) + "\n")
+        mon._poll()
+        assert states == [("trae", "thinking"), ("trae", "idle")]
+
+    def test_precise_channel_suppresses_memory(self, tmp_path):
+        mon, summary, states = self._monitor(tmp_path)
+        mon._precise_seen_at = time.time()  # 等效 Hook/hub 刚产生过精确事件
+        with open(summary, "a", encoding="utf-8") as fh:
+            fh.write(json.dumps({"intent": "x"}) + "\n")
+        mon._poll()
+        assert states == []
+
+
 class TestOpenCodeSqliteTail:
     def test_sqlite_incremental_poll(self, tmp_path):
         """OpenCode 监视器：自建 sqlite event 表，验证 backfill 防护 + 增量轮询。"""
